@@ -31,6 +31,7 @@ from torch.utils.data import DataLoader
 
 from sg2im.data import imagenet_deprocess_batch
 from sg2im.data.coco import CocoSceneGraphDataset, coco_collate_fn
+from sg2im.data.vg import VgSceneGraphDataset, vg_collate_fn
 from sg2im.discriminators import PatchDiscriminator, AcCropDiscriminator
 from sg2im.losses import get_gan_losses
 from sg2im.metrics import jaccard
@@ -42,13 +43,19 @@ from tqdm import tqdm
 
 torch.backends.cudnn.benchmark = True
 
+VG_DIR = os.path.expanduser('datasets/vg')
+COCO_DIR = os.path.expanduser('/mnt/xfs1/hassan2/projectdata/data/coco/val2017/')
 
 parser = argparse.ArgumentParser()
+parser.add_argument('--dataset', default='coco', choices=['vg', 'coco'])
 
 # Optimization hyperparameters
-parser.add_argument('--batch_size', default=5, type=int)
-parser.add_argument('--num_epochs', default=100, type=int)
+parser.add_argument('--batch_size', default=50, type=int)
+parser.add_argument('--num_iterations', default=1000000, type=int)
 parser.add_argument('--learning_rate', default=1e-4, type=float)
+
+# Switch the generator to eval mode after this many iterations
+parser.add_argument('--eval_mode_after', default=100000, type=int)
 
 # Dataset options common to both VG and COCO
 parser.add_argument('--image_size', default='64,64', type=int_tuple)
@@ -56,25 +63,29 @@ parser.add_argument('--num_train_samples', default=None, type=int)
 parser.add_argument('--num_val_samples', default=1024, type=int)
 parser.add_argument('--shuffle_val', default=True, type=bool_flag)
 parser.add_argument('--loader_num_workers', default=4, type=int)
-
+parser.add_argument('--include_relationships', default=True, type=bool_flag)
 
 # VG-specific options
+parser.add_argument('--vg_image_dir', default=os.path.join(VG_DIR, 'images'))
+parser.add_argument('--train_h5', default=os.path.join(VG_DIR, 'train.h5'))
+parser.add_argument('--val_h5', default=os.path.join(VG_DIR, 'val.h5'))
+parser.add_argument('--vocab_json', default=os.path.join(VG_DIR, 'vocab.json'))
 parser.add_argument('--max_objects_per_image', default=8, type=int)
+parser.add_argument('--vg_use_orphaned_objects', default=True, type=bool_flag)
 
 # COCO-specific options
 parser.add_argument('--coco_train_image_dir',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/val2017/')
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/train2017/'))
 parser.add_argument('--coco_val_image_dir',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/val2017/')
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/val2017/'))
 parser.add_argument('--coco_train_instances_json',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_val2017.json')
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_train2017.json'))
 parser.add_argument('--coco_train_stuff_json',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_val2017.json')
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_train2017.json'))
 parser.add_argument('--coco_val_instances_json',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_val2017.json')
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_val2017.json'))
 parser.add_argument('--coco_val_stuff_json',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_val2017.json')
-
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_val2017.json'))
 parser.add_argument('--instance_whitelist', default=None, type=str_tuple)
 parser.add_argument('--stuff_whitelist', default=None, type=str_tuple)
 parser.add_argument('--coco_include_other', default=False, type=bool_flag)
@@ -96,9 +107,10 @@ parser.add_argument('--layout_noise_dim', default=32, type=int)
 parser.add_argument('--use_boxes_pred_after', default=-1, type=int)
 
 # Generator losses
+parser.add_argument('--mask_loss_weight', default=0, type=float)
 parser.add_argument('--l1_pixel_loss_weight', default=1.0, type=float)
 parser.add_argument('--bbox_pred_loss_weight', default=10, type=float)
-
+parser.add_argument('--predicate_pred_loss_weight', default=0, type=float) # DEPRECATED
 
 # Generic discriminator options
 parser.add_argument('--discriminator_loss_weight', default=0.01, type=float)
@@ -111,7 +123,7 @@ parser.add_argument('--d_activation', default='leakyrelu-0.2')
 # Object discriminator
 parser.add_argument('--d_obj_arch',
     default='C4-64-2,C4-128-2,C4-256-2')
-parser.add_argument('--crop_size', default=16, type=int)
+parser.add_argument('--crop_size', default=32, type=int)
 parser.add_argument('--d_obj_weight', default=1.0, type=float) # multiplied by d_loss_weight 
 parser.add_argument('--ac_loss_weight', default=0.1, type=float)
 
@@ -119,10 +131,15 @@ parser.add_argument('--ac_loss_weight', default=0.1, type=float)
 parser.add_argument('--d_img_arch',
     default='C4-64-2,C4-128-2,C4-256-2')
 parser.add_argument('--d_img_weight', default=1.0, type=float) # multiplied by d_loss_weight
-# Output options
 
-parser.add_argument('--checkpoint_folder', default='generated_outputs')
-parser.add_argument('--checkpoint_start_from', default='stats/epoch_3_batch_99_with_model.pt')
+# Output options
+parser.add_argument('--print_every', default=10, type=int)
+parser.add_argument('--timing', default=False, type=bool_flag)
+parser.add_argument('--checkpoint_every', default=10000, type=int)
+parser.add_argument('--output_dir', default=os.getcwd())
+parser.add_argument('--checkpoint_name', default='checkpoint')
+parser.add_argument('--checkpoint_start_from', default=None)
+parser.add_argument('--restore_from_checkpoint', default=False, type=bool_flag)
 
 
 def add_loss(total_loss, curr_loss, loss_dict, loss_name, weight=1):
@@ -144,21 +161,33 @@ def check_args(args):
 
 
 def build_model(args, vocab):
-  kwargs = {
-    'vocab': vocab,
-    'image_size': args.image_size,
-    'embedding_dim': args.embedding_dim,
-    'gconv_dim': args.gconv_dim,
-    'gconv_hidden_dim': args.gconv_hidden_dim,
-    'gconv_num_layers': args.gconv_num_layers,
-    'mlp_normalization': args.mlp_normalization,
-    'refinement_dims': args.refinement_network_dims,
-    'normalization': args.normalization,
-    'activation': args.activation,
-    'mask_size': args.mask_size,
-    'layout_noise_dim': args.layout_noise_dim,
-  }
-  model = Layout2ImModel(**kwargs)
+  if args.checkpoint_start_from is not None:
+    checkpoint = torch.load(args.checkpoint_start_from)
+    kwargs = checkpoint['model_kwargs']
+    #model = Sg2ImModel(**kwargs)
+    raw_state_dict = checkpoint['model_state']
+    state_dict = {}
+    for k, v in raw_state_dict.items():
+      if k.startswith('module.'):
+        k = k[7:]
+      state_dict[k] = v
+    model.load_state_dict(state_dict)
+  else:
+    kwargs = {
+      'vocab': vocab,
+      'image_size': args.image_size,
+      'embedding_dim': args.embedding_dim,
+      'gconv_dim': args.gconv_dim,
+      'gconv_hidden_dim': args.gconv_hidden_dim,
+      'gconv_num_layers': args.gconv_num_layers,
+      'mlp_normalization': args.mlp_normalization,
+      'refinement_dims': args.refinement_network_dims,
+      'normalization': args.normalization,
+      'activation': args.activation,
+      'mask_size': args.mask_size,
+      'layout_noise_dim': args.layout_noise_dim,
+    }
+    model = Layout2ImModel(**kwargs)
   return model, kwargs
 
 
@@ -214,7 +243,7 @@ def build_coco_dsets(args):
     'instance_whitelist': args.instance_whitelist,
     'stuff_whitelist': args.stuff_whitelist,
     'include_other': args.coco_include_other,
-    #'include_relationships': args.include_relationships,
+    'include_relationships': args.include_relationships,
   }
   train_dset = CocoSceneGraphDataset(**dset_kwargs)
   num_objs = train_dset.total_objects()
@@ -234,10 +263,37 @@ def build_coco_dsets(args):
   return vocab, train_dset, val_dset
 
 
-def build_loaders(args):
+def build_vg_dsets(args):
+  with open(args.vocab_json, 'r') as f:
+    vocab = json.load(f)
+  dset_kwargs = {
+    'vocab': vocab,
+    'h5_path': args.train_h5,
+    'image_dir': args.vg_image_dir,
+    'image_size': args.image_size,
+    'max_samples': args.num_train_samples,
+    'max_objects': args.max_objects_per_image,
+    'use_orphaned_objects': args.vg_use_orphaned_objects,
+    'include_relationships': args.include_relationships,
+  }
+  train_dset = VgSceneGraphDataset(**dset_kwargs)
+  iter_per_epoch = len(train_dset) // args.batch_size
+  print('There are %d iterations per epoch' % iter_per_epoch)
 
-  vocab, train_dset, val_dset = build_coco_dsets(args)
-  collate_fn = coco_collate_fn
+  dset_kwargs['h5_path'] = args.val_h5
+  del dset_kwargs['max_samples']
+  val_dset = VgSceneGraphDataset(**dset_kwargs)
+  
+  return vocab, train_dset, val_dset
+
+
+def build_loaders(args):
+  if args.dataset == 'vg':
+    vocab, train_dset, val_dset = build_vg_dsets(args)
+    collate_fn = vg_collate_fn
+  elif args.dataset == 'coco':
+    vocab, train_dset, val_dset = build_coco_dsets(args)
+    collate_fn = coco_collate_fn
 
   loader_kwargs = {
     'batch_size': args.batch_size,
@@ -250,6 +306,86 @@ def build_loaders(args):
   loader_kwargs['shuffle'] = args.shuffle_val
   val_loader = DataLoader(val_dset, **loader_kwargs)
   return vocab, train_loader, val_loader
+
+
+def check_model(args, t, loader, model):
+  return
+  float_dtype = torch.cuda.FloatTensor
+  long_dtype = torch.cuda.LongTensor
+  num_samples = 0
+  all_losses = defaultdict(list)
+  total_iou = 0
+  total_boxes = 0
+  with torch.no_grad():
+    for batch in loader:
+      batch = [tensor.cuda() for tensor in batch]
+      masks = None
+      if len(batch) == 6:
+        imgs, objs, boxes, triples, obj_to_img, triple_to_img = batch
+      elif len(batch) == 7:
+        imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img = batch
+      
+
+      # Run the model as it has been run during training
+      model_masks = masks
+      model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, masks_gt=model_masks)
+      imgs_pred, boxes_pred, masks_pred, predicate_scores = model_out
+
+      skip_pixel_loss = False
+      total_loss, losses =  calculate_model_losses(
+                                args, skip_pixel_loss, model, imgs, imgs_pred,
+                                boxes, boxes_pred, masks, masks_pred,
+                                predicates, predicate_scores)
+
+      total_iou += jaccard(boxes_pred, boxes)
+      total_boxes += boxes_pred.size(0)
+
+      for loss_name, loss_val in losses.items():
+        all_losses[loss_name].append(loss_val)
+      num_samples += imgs.size(0)
+      if num_samples >= args.num_val_samples:
+        break
+
+    samples = {}
+    samples['gt_img'] = imgs
+
+    model_out = model(objs, triples, obj_to_img, boxes_gt=boxes, masks_gt=masks)
+    samples['gt_box_gt_mask'] = model_out[0]
+
+    model_out = model(objs, triples, obj_to_img, boxes_gt=boxes)
+    samples['gt_box_pred_mask'] = model_out[0]
+
+    model_out = model(objs, triples, obj_to_img)
+    samples['pred_box_pred_mask'] = model_out[0]
+
+    for k, v in samples.items():
+      samples[k] = imagenet_deprocess_batch(v)
+
+    mean_losses = {k: np.mean(v) for k, v in all_losses.items()}
+    avg_iou = total_iou / total_boxes
+
+    masks_to_store = masks
+    if masks_to_store is not None:
+      masks_to_store = masks_to_store.data.cpu().clone()
+
+    masks_pred_to_store = masks_pred
+    if masks_pred_to_store is not None:
+      masks_pred_to_store = masks_pred_to_store.data.cpu().clone()
+
+  batch_data = {
+    'objs': objs.detach().cpu().clone(),
+    'boxes_gt': boxes.detach().cpu().clone(), 
+    'masks_gt': masks_to_store,
+    'triples': triples.detach().cpu().clone(),
+    'obj_to_img': obj_to_img.detach().cpu().clone(),
+    'triple_to_img': triple_to_img.detach().cpu().clone(),
+    'boxes_pred': boxes_pred.detach().cpu().clone(),
+    'masks_pred': masks_pred_to_store
+  }
+  out = [mean_losses, samples, batch_data, avg_iou]
+
+  return tuple(out)
+
 
 def calculate_model_losses(args, model, img, img_pred,
                            bbox, bbox_pred, logit_boxes,generated_boxes,original_combined):
@@ -282,7 +418,7 @@ def calculate_model_losses(args, model, img, img_pred,
 
 
 def main(args):
-  #print(args)
+  print(args)
   check_args(args)
   float_dtype = torch.cuda.FloatTensor
   long_dtype = torch.cuda.LongTensor
@@ -291,7 +427,6 @@ def main(args):
   model, model_kwargs = build_model(args, vocab)
   model.type(float_dtype)
   model=model.cuda()
-
   layoutgen = LayoutGenerator(args.batch_size,args.max_objects_per_image+1,184).cuda()
   optimizer_params = list(model.parameters()) + list(layoutgen.parameters())
   optimizer = torch.optim.Adam(params=optimizer_params, lr=args.learning_rate)
@@ -301,9 +436,7 @@ def main(args):
   img_discriminator, d_img_kwargs = build_img_discriminator(args, vocab)
   obj_discriminator= obj_discriminator.cuda()
   img_discriminator=img_discriminator.cuda()
-
-  H,W = args.image_size
-  layout_discriminator = LayoutDiscriminator(args.batch_size,args.max_objects_per_image+1,184,H,W).cuda()  
+  layout_discriminator = LayoutDiscriminator(args.batch_size,args.max_objects_per_image+1,184,64,64).cuda()  
 
   gan_g_loss, gan_d_loss = get_gan_losses(args.gan_loss_type)
   
@@ -319,28 +452,99 @@ def main(args):
 
   optimizer_d_layout=torch.optim.Adam(params=layout_discriminator.parameters(), lr = args.learning_rate)
   
-  epoch = 0
+  
+  model_path='stats/epoch_2_batch_399_with_model.pt'
+  checkpoint = torch.load(model_path)
+  model.load_state_dict(checkpoint['model_state'])
+  layoutgen.load_state_dict(checkpoint['layout_gen'])
+  
+  obj_discriminator.load_state_dict(checkpoint['d_obj_state'])
+  img_discriminator.load_state_dict(checkpoint['d_img_state'])
+  layout_discriminator.load_state_dict(checkpoint['d_layout_state'])
 
-  if(args.checkpoint_start_from is not None):
-    model_path=args.checkpoint_start_from
+  optimizer_d_obj.load_state_dict(checkpoint['d_obj_optim_state'])
+  optimizer_d_img.load_state_dict(checkpoint['d_img_optim_state'])
+  optimizer_d_layout.load_state_dict(checkpoint['d_layout_optim_state'])
+  optimizer.load_state_dict(checkpoint['optim_state'])
 
-    checkpoint = torch.load(model_path)
-    epoch = checkpoint['args']['epoch']
-    model.load_state_dict(checkpoint['model_state'])
-    layoutgen.load_state_dict(checkpoint['layout_gen'])
+
+  # checkpoint = torch.load('sg2im-models/coco64.pt')
+  # model.load_state_dict(checkpoint['model_state'])
+  # 0/0
+
+
+  # 'model_state':model.state_dict(),
+  #   'layout_gen':layoutgen.state_dict(),
+  #   'd_obj_state': obj_discriminator.state_dict(),
+  #   'd_img_state': img_discriminator.state_dict(),
+  #   'd_layout_state':layout_discriminator.state_dict(),
+
+  #   'd_obj_optim_state': optimizer_d_obj.state_dict(),
+  #   'd_img_optim_state': optimizer_d_img.state_dict(),
+  #   'd_layout_optim_state':optimizer_d_layout.state_dict(),
+  #   'optim_state': optimizer.state_dict(),
+
+
+  # restore_path = None
+  # if args.restore_from_checkpoint:
+  #   restore_path = 'stats/%s_with_model.pt' % args.checkpoint_name
+  #   restore_path = os.path.join(args.output_dir, restore_path)
+
+  # if restore_path is not None and os.path.isfile(restore_path):
+  #   print('Restoring from checkpoint:')
+  #   print(restore_path)
+  #   checkpoint = torch.load(restore_path)
+  #   model.load_state_dict(checkpoint['model_state'])
+  #   optimizer.load_state_dict(checkpoint['optim_state'])
     
-    obj_discriminator.load_state_dict(checkpoint['d_obj_state'])
-    img_discriminator.load_state_dict(checkpoint['d_img_state'])
-    layout_discriminator.load_state_dict(checkpoint['d_layout_state'])
+  #   obj_discriminator.load_state_dict(checkpoint['d_obj_state'])
+  #   optimizer_d_obj.load_state_dict(checkpoint['d_obj_optim_state'])
 
-    optimizer_d_obj.load_state_dict(checkpoint['d_obj_optim_state'])
-    optimizer_d_img.load_state_dict(checkpoint['d_img_optim_state'])
-    optimizer_d_layout.load_state_dict(checkpoint['d_layout_optim_state'])
-    optimizer.load_state_dict(checkpoint['optim_state'])
+  #   img_discriminator.load_state_dict(checkpoint['d_img_state'])
+  #   optimizer_d_img.load_state_dict(checkpoint['d_img_optim_state'])
 
 
+
+  #   t = checkpoint['counters']['t']
+  #   if 0 <= args.eval_mode_after <= t:
+  #     model.eval()
+  #   else:
+  #     model.train()
+  #   epoch = checkpoint['counters']['epoch']
+  # else:
+  #   t, epoch = 0, 0
+  #   checkpoint = {
+  #     'args': args.__dict__,
+  #     'vocab': vocab,
+  #     'model_kwargs': model_kwargs,
+  #     'd_obj_kwargs': d_obj_kwargs,
+  #     'd_img_kwargs': d_img_kwargs,
+  #     'losses_ts': [],
+  #     'losses': defaultdict(list),
+  #     'd_losses': defaultdict(list),
+  #     'checkpoint_ts': [],
+  #     'train_batch_data': [], 
+  #     'train_samples': [],
+  #     'train_iou': [],
+  #     'val_batch_data': [], 
+  #     'val_samples': [],
+  #     'val_losses': defaultdict(list),
+  #     'val_iou': [], 
+  #     'norm_d': [], 
+  #     'norm_g': [],
+  #     'counters': {
+  #       't': None,
+  #       'epoch': None,
+  #     },
+  #     'model_state': None, 'model_best_state': None, 'optim_state': None,
+  #     'd_obj_state': None, 'd_obj_best_state': None, 'd_obj_optim_state': None,
+  #     'd_img_state': None, 'd_img_best_state': None, 'd_img_optim_state': None,
+  #     'best_t': [],
+  #   }
+
+  epoch = 2
   while True:
-    if(epoch>=args.num_epochs):
+    if(epoch>=20):
       break
     
     epoch += 1
@@ -369,24 +573,30 @@ def main(args):
       
 
       new_gen_boxes = torch.empty((0,4)).cuda()
-      new_feature_vecs=torch.empty((0,args.embedding_dim)).cuda()
+      new_feature_vecs=torch.empty((0,128)).cuda()
 
       for kb in range(args.batch_size):
           new_gen_boxes=torch.cat([new_gen_boxes,torch.squeeze(generated_boxes[kb,:all_num_objs[kb],:4])],dim=0)
           new_feature_vecs=torch.cat([new_feature_vecs,torch.squeeze(feature_vectors[kb,:all_num_objs[kb],:])],dim=0)
 
+      #print('Shape of new gen boxes:',new_gen_boxes.shape)
+      #print('Shape of new feature vec:',new_feature_vecs.shape)
       boxes_pred=new_gen_boxes
-      model_boxes=generated_boxes
-      model_masks=None
-      triples=None
 
-      imgs_pred = model(new_feature_vecs,new_gen_boxes, triples, obj_to_img)
-                        #boxes_gt=model_boxes, masks_gt=model_masks)
-      #imgs_pred, boxes_pred, masks_pred, predicate_scores = model_out
-      
-      # Skip the pixel loss if using GT boxes
+      with timeit('forward', args.timing):
+        #model_boxes = boxes
+        model_boxes=generated_boxes
+        #model_masks = masks
+        model_masks=None
+        triples=None
 
-      total_loss, losses =  calculate_model_losses(args, model, imgs, imgs_pred,boxes, boxes_pred, logit_boxes, generated_boxes,combined)
+        imgs_pred = model(new_feature_vecs,new_gen_boxes, triples, obj_to_img)
+                          #boxes_gt=model_boxes, masks_gt=model_masks)
+        #imgs_pred, boxes_pred, masks_pred, predicate_scores = model_out
+      with timeit('loss', args.timing):
+        # Skip the pixel loss if using GT boxes
+        skip_pixel_loss = (model_boxes is None)
+        total_loss, losses =  calculate_model_losses(args, model, imgs, imgs_pred,boxes, boxes_pred, logit_boxes, generated_boxes,combined)
 
       scores_fake, ac_loss = obj_discriminator(imgs_pred, objs, boxes, obj_to_img)
       total_loss = add_loss(total_loss, ac_loss, losses, 'ac_loss',
@@ -413,9 +623,9 @@ def main(args):
         continue
 
       optimizer.zero_grad()
-      
-      #print('Total loss:',total_loss)
-      total_loss.backward()
+      with timeit('backward', args.timing):
+        #print('Total loss:',total_loss)
+        total_loss.backward()
 
       optimizer.step()
       total_loss_d = None
@@ -464,13 +674,12 @@ def main(args):
       optimizer_d_layout.step()
 
       if((batchnum+1)%10==0):
-        towrite='\n|Epoch:'+str(epoch)+' | Batch:'+str(batchnum)+' | layout Loss:'+str(d_layout_losses.total_loss.item())+' | img disc loss:'+str(d_img_losses.total_loss.item())+' | obj disc loss:'+str(d_obj_losses.total_loss.item())+' | total gen loss:'+str(total_loss.item())
+        towrite='\n|Epoch:'+str(epoch)+' | layout Loss:'+str(d_layout_losses.total_loss)+' | img disc loss:'+str(d_img_losses.total_loss)+' | obj disc loss:'+str(d_obj_losses.total_loss)+' | total gen loss:'+str(total_loss)
         with open('stats/training_stats.txt','a+') as f:
             f.write(towrite)
 
       if((batchnum+1)%100==0):
         checkpoint={
-        'args':{'epoch':epoch},
         'model_state':model.state_dict(),
         'layout_gen':layoutgen.state_dict(),
         'd_obj_state': obj_discriminator.state_dict(),
@@ -483,13 +692,13 @@ def main(args):
         'optim_state': optimizer.state_dict(),
 
         }
-        print('Saving checkpoint to ', args.checkpoint_folder)
-        checkpoint_path = os.path.join(args.checkpoint_folder,'epoch_'+str(epoch)+'_batch_'+str(batchnum)+'_with_model.pt')
+        print('Saving checkpoint to ', 'stats/')
+        checkpoint_path = os.path.join('stats/',
+                              'epoch_'+str(epoch)+'_batch_'+str(batchnum)+'_with_model.pt')
         torch.save(checkpoint, checkpoint_path)
 
 
     checkpoint={
-    'args':{'epoch':epoch},
     'model_state':model.state_dict(),
     'layout_gen':layoutgen.state_dict(),
     'd_obj_state': obj_discriminator.state_dict(),
@@ -502,9 +711,79 @@ def main(args):
     'optim_state': optimizer.state_dict(),
 
     }
-    print('Saving checkpoint to ', args.checkpoint_folder)
-    checkpoint_path = os.path.join(args.checkpoint_folder,'epoch_'+str(epoch)+'_with_model.pt')
+    print('Saving checkpoint to ', 'stats/')
+    checkpoint_path = os.path.join('stats/',
+                              'epoch_'+str(epoch)+'_with_model.pt')
     torch.save(checkpoint, checkpoint_path)
+      #   for name, val in losses.items():
+      #     print(' G [%s]: %.4f' % (name, val))
+      #     checkpoint['losses'][name].append(val)
+      #   checkpoint['losses_ts'].append(t)
+
+      #   if obj_discriminator is not None:
+      #     for name, val in d_obj_losses.items():
+      #       print(' D_obj [%s]: %.4f' % (name, val))
+      #       checkpoint['d_losses'][name].append(val)
+
+      #   if img_discriminator is not None:
+      #     for name, val in d_img_losses.items():
+      #       print(' D_img [%s]: %.4f' % (name, val))
+      #       checkpoint['d_losses'][name].append(val)
+      
+      # if t % args.checkpoint_every == 0:
+      #   print('checking on train')
+      #   train_results = check_model(args, t, train_loader, model)
+      #   t_losses, t_samples, t_batch_data, t_avg_iou = train_results
+
+      #   checkpoint['train_batch_data'].append(t_batch_data)
+      #   checkpoint['train_samples'].append(t_samples)
+      #   checkpoint['checkpoint_ts'].append(t)
+      #   checkpoint['train_iou'].append(t_avg_iou)
+
+      #   print('checking on val')
+      #   val_results = check_model(args, t, val_loader, model)
+      #   val_losses, val_samples, val_batch_data, val_avg_iou = val_results
+      #   checkpoint['val_samples'].append(val_samples)
+      #   checkpoint['val_batch_data'].append(val_batch_data)
+      #   checkpoint['val_iou'].append(val_avg_iou)
+
+      #   print('train iou: ', t_avg_iou)
+      #   print('val iou: ', val_avg_iou)
+
+        # for k, v in val_losses.items():
+        #   checkpoint['val_losses'][k].append(v)
+        # checkpoint['model_state'] = model.state_dict()
+
+        # checkpoint['layoutgen'] = layoutgen.state_dict()
+        # #checkpoint['layoutgen_state'] = 
+        # if obj_discriminator is not None:
+        #   checkpoint['d_obj_state'] = obj_discriminator.state_dict()
+        #   checkpoint['d_obj_optim_state'] = optimizer_d_obj.state_dict()
+
+        # if img_discriminator is not None:
+        #   checkpoint['d_img_state'] = img_discriminator.state_dict()
+        #   checkpoint['d_img_optim_state'] = optimizer_d_img.state_dict()
+
+        # checkpoint['optim_state'] = optimizer.state_dict()
+        # checkpoint['counters']['t'] = t
+        # checkpoint['counters']['epoch'] = epoch
+        # checkpoint_path = os.path.join(args.output_dir,
+        #                       '%s_with_model.pt' % args.checkpoint_name)
+        # print('Saving checkpoint to ', checkpoint_path)
+        # torch.save(checkpoint, checkpoint_path)
+
+        # # Save another checkpoint without any model or optim state
+        # checkpoint_path = os.path.join(args.output_dir,
+        #                       '%s_no_model.pt' % args.checkpoint_name)
+        # key_blacklist = ['model_state', 'optim_state', 'model_best_state',
+        #                  'd_obj_state', 'd_obj_optim_state', 'd_obj_best_state',
+        #                  'd_img_state', 'd_img_optim_state', 'd_img_best_state']
+        # small_checkpoint = {}
+        # for k, v in checkpoint.items():
+        #   if k not in key_blacklist:
+        #     small_checkpoint[k] = v
+        # torch.save(small_checkpoint, checkpoint_path)
+
 
 if __name__ == '__main__':
   args = parser.parse_args()

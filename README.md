@@ -1,95 +1,109 @@
-# sg2im
 
-This is the code for the paper
+Ref Repository: https://github.com/google/sg2im
 
-**<a href="https://arxiv.org/abs/1804.01622">Image Generation from Scene Graphs</a>**
-<br>
-<a href="http://cs.stanford.edu/people/jcjohns/">Justin Johnson</a>,
-<a href="http://web.stanford.edu/~agrim/">Agrim Gupta</a>,
-<a href="http://vision.stanford.edu/feifeili/">Li Fei-Fei</a>
-<br>
-Presented at [CVPR 2018](http://cvpr2018.thecvf.com/)
 
-Please note that this is not an officially supported Google product.
+# Object Alignment
 
-A **scene graph** is a structured representation of a visual scene where nodes represent *objects* in the scene and edges represent *relationships* between objects. In this paper we present and end-to-end neural network model that inputs a scene graph and outputs an image.
+Folder: Object_Alignment
 
-Below we show some example scene graphs along with images generated from those scene graphs using our model. By modifying the input scene graph we can exercise fine-grained control over the objects in the generated image.
+## LayoutGAN for bbox experiments
 
-<div align='center'>
-  <img src='images/sheep/sg000000.png' width='112px'>
-  <img src='images/sheep/sg000001.png' width='112px'>
-  <img src='images/sheep/sg000002.png' width='112px'>
-  <img src='images/sheep/sg000003.png' width='112px'>
-  <img src='images/sheep/sg000004.png' width='112px'>
-  <img src='images/sheep/sg000005.png' width='112px'>
-  <img src='images/sheep/sg000006.png' width='112px'>
-  <br>
-  <img src='images/sheep/img000000.png' height='112px'>
-  <img src='images/sheep/img000001.png' height='112px'>
-  <img src='images/sheep/img000002.png' height='112px'>
-  <img src='images/sheep/img000003.png' height='112px'>
-  <img src='images/sheep/img000004.png' height='112px'>
-  <img src='images/sheep/img000005.png' height='112px'>
-  <img src='images/sheep/img000006.png' height='112px'>
-</div>
+First, download the trasformed point layout representation of MNIST dataset from
+https://drive.google.com/file/d/1R1iRZxADR_RcDsuR4gyStyLAo7i5LRAH/view?usp=sharing,
+and put it under ./data directory.
 
-If you find this code useful in your research then please cite
-```
-@inproceedings{johnson2018image,
-  title={Image Generation from Scene Graphs},
-  author={Johnson, Justin and Gupta, Agrim and Fei-Fei, Li},
-  booktitle={CVPR},
-  year={2018}
-}
-```
+To train a model with downloaded dataset:
+$ bash ./experiments/scripts/train_mnist.sh
 
-## Model
-The input scene graph is processed with a *graph convolution network* which passes information along edges to compute embedding vectors for all objects. These vectors are used to predict bounding boxes and segmentation masks for all objects, which are combined to form a coarse *scene layout*. The layout is passed to a *cascaded refinement network* (Chen an Koltun, ICCV 2017) which generates an output image at increasing spatial scales. The model is trained adversarially against a pair of *discriminator networks* which ensure that output images look realistic.
+In order to run the codes for each experiment, you need to save this folder in your Google Drive. After adding in your drive, you can simply open the notebooks in Google Colab and run the cells.
 
-<div align='center'>
-  <img src='images/system.png' width='1000px'>
-</div>
+You need to mount your drive on Google Colab before running the cells in notebook so that files could be accessed without any error.
 
-## Setup
-All code was developed and tested on Ubuntu 16.04 with Python 3.5 and PyTorch 0.4.
+## Dataset Preparation
 
-You can setup a virtual environment to run the code like this:
+(NOTE: We have already downloaded and processed the data and saved it as numpy array, so you can skip the steps below)
+
+1. Use [PubLayNet dataset](https://dax-cdn.cdn.appdomain.cloud/dax-publaynet/1.0.0/PubLayNet.html). Download `labels.tar.gz` and decompress it.
+2. Run `python preprocess_doc.py` for preprocessing dataset.
+
+## Prerequisites
+
+-   Python 2.7
+-   Tensorflow 1.2.0
+-   [COCO API](https://github.com/cocodataset/cocoapi)
+
+
+## 
+
+
+# Image Generation
+Ref for this readme: https://github.com/google/sg2im/blob/master/TRAINING.md
+
+
+## Step 1: Install COCO API
+To train new models you will need to install the [COCO Python API](https://github.com/cocodataset/cocoapi). Unfortunately installing this package via pip often leads to build errors, but you can install it from source like this:
 
 ```bash
-python3 -m venv env               # Create a virtual environment
-source env/bin/activate           # Activate virtual environment
-pip install -r requirements.txt   # Install dependencies
-echo $PWD > env/lib/python3.5/site-packages/sg2im.pth  # Add current directory to python path
-# Work for a while ...
-deactivate  # Exit virtual environment
+cd ~
+git clone https://github.com/cocodataset/cocoapi.git
+cd cocoapi/PythonAPI/
+python setup.py install
 ```
+
+## Step 2: Preparing the data
+### COCO
+Run the following script to download and unpack the relevant parts of the COCO dataset:
+
+```bash
+bash scripts/download_coco.sh
+```
+
+This will create the directory `datasets/coco` and will download about 21 GB of data to this directory; after unpacking it will take about 60 GB of disk space.
+
+
+## Step 3: Train a model
+
+Now you can train a new model by running the script:
+
+```bash
+python scripts/train.py
+```
+To train the model:
+python scripts/sample.py --batch_size [BATCH_SIZE] --num_epochs [NUM_EPOCHS] --learning_rate [0.0001] --coco_train_image_dir [COCO_IMG_DIR] --coco_val_image_dir [COCO_VAL_DIR] --coco_train_instances_json [PATH_TO_TRAIN_INSTANCE_JSON] --coco_train_stuff_json [PATH_TO_TRAIN_STUFF_JSON] --coco_val_instances_json [PATH_TO_VAL_INSTANCE_JSON_FILE] --coco_val_stuff_json [PATH_TO_VAL_STUFF_JSON_FILE]
+
+
+- `--batch_size`: How many pairs of (scene graph, image) to use in each minibatch during training. Default is 5.
+- `--num_epochs`: Number of training iterations. Default is 100.
+- `--learning_rate`: Learning rate to use in Adam optimizer for the generator and discriminators; default is 1e-4.
+
+### Dataset options
+
+- `--dataset`: The dataset to use for training;
+- `--image_size`: The size of images to generate, as a tuple of integers. Default is `64,64`. This is also the resolution at which scene layouts are predicted.
+
+**COCO options**:
+These flags only take effect if `--dataset` is set to `coco`:
+
+- `--coco_train_image_dir`: Directory from which to load COCO training images; 
+- `--coco_val_image_dir`: Directory from which to load COCO validation images; 
+- `--coco_train_instances_json`: Path to JSON file containing object annotations for the COCO training images; 
+- `--coco_train_stuff_json`: Path to JSON file containing stuff annotations for the COCO training images; 
+- `--coco_val_instances_json`: Path to JSON file containing object annotations for COCO validation images; 
+- `--coco_train_instances_json`: Path to JSON file containing stuff annotations for COCO validation images; 
+
+
 
 ## Pretrained Models
-You can download pretrained models by running the script `bash scripts/download_models.sh`. This will download the following models, and will require about 355 MB of disk space:
+Download the model weights from https://drive.google.com/file/d/1kw92ceFq6bylYQ4aw1wPxWnUglYvuCuz/view?usp=sharing
 
-- `sg2im-models/coco64.pt`: Trained to generate 64 x 64 images on the COCO-Stuff dataset. This model was used to generate the COCO images in Figure 5 from the paper.
-- `sg2im-models/vg64.pt`: Trained to generate 64 x 64 images on the Visual Genome dataset. This model was used to generate the Visual Genome images in Figure 5 from the paper.
-- `sg2im-models/vg128.pt`: Trained to generate 128 x 128 images on the Visual Genome dataset. This model was used to generate the images in Figure 6 from the paper.
 
-Table 1 in the paper presents an ablation study where we disable various components of the full model. You can download the additional models used in this ablation study by running the script `bash scripts/download_ablated_models.sh`. This will download 12 additional models, requiring and additional 1.25 GB of disk space.
+## Sample generated images
+Following command will generate some images given a set of objects from the validation set of COCO.
 
-## Running Models
-You can use the script `scripts/run_model.py` to easily run any of the pretrained models on new scene graphs using a simple human-readable JSON format. For example you can replicate the sheep images above like this:
+To sample some of the generate images:
+python scripts/sample.py --output_folder [PATH_TO_STORE_IMAGES] --num_sample_imgs [NUM_OF_IMAGES] --checkpoint_start_from [MODEL_WEIGHTS_PATH]
 
-```bash
-python scripts/run_model.py \
-  --checkpoint sg2im-models/vg128.pt \
-  --scene_graphs scene_graphs/figure_6_sheep.json \
-  --output_dir outputs
-```
 
-The generated images will be saved to the directory specified by the `--output_dir` flag. You can control whether the model runs on CPU or GPU using py passing the flag `--device cpu` or `--device gpu`.
 
-We provide JSON files and pretrained models allowing you to recreate all images from Figures 5 and 6 from the paper.
 
-#### (Optional): GraphViz
-This script can also draw images for the scene graphs themselves using [GraphViz](http://www.graphviz.org/); to enable this option just add the flag `--draw_scene_graphs 1` and the scene graph images will also be saved in the output directory. For this option to work you must install GraphViz; on Ubuntu 16.04 you can simply run `sudo apt-get install graphviz`.
 
-## Training new models
-Instructions for training new models can be [found here](TRAINING.md).

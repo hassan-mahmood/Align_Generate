@@ -28,7 +28,7 @@ import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-
+import cv2 
 from sg2im.data import imagenet_deprocess_batch
 from sg2im.data.coco import CocoSceneGraphDataset, coco_collate_fn
 from sg2im.discriminators import PatchDiscriminator, AcCropDiscriminator
@@ -46,9 +46,7 @@ torch.backends.cudnn.benchmark = True
 parser = argparse.ArgumentParser()
 
 # Optimization hyperparameters
-parser.add_argument('--batch_size', default=5, type=int)
-parser.add_argument('--num_epochs', default=100, type=int)
-parser.add_argument('--learning_rate', default=1e-4, type=float)
+parser.add_argument('--batch_size', default=1, type=int)
 
 # Dataset options common to both VG and COCO
 parser.add_argument('--image_size', default='64,64', type=int_tuple)
@@ -121,9 +119,9 @@ parser.add_argument('--d_img_arch',
 parser.add_argument('--d_img_weight', default=1.0, type=float) # multiplied by d_loss_weight
 # Output options
 
-parser.add_argument('--checkpoint_folder', default='generated_outputs')
+parser.add_argument('--output_folder', default='generated_outputs')
 parser.add_argument('--checkpoint_start_from', default='stats/epoch_3_batch_99_with_model.pt')
-
+parser.add_argument('--num_sample_imgs',default=10,type=int)
 
 def add_loss(total_loss, curr_loss, loss_dict, loss_name, weight=1):
   curr_loss = curr_loss * weight
@@ -293,68 +291,24 @@ def main(args):
   model=model.cuda()
 
   layoutgen = LayoutGenerator(args.batch_size,args.max_objects_per_image+1,184).cuda()
-  optimizer_params = list(model.parameters()) + list(layoutgen.parameters())
-  optimizer = torch.optim.Adam(params=optimizer_params, lr=args.learning_rate)
-  
 
-  obj_discriminator, d_obj_kwargs = build_obj_discriminator(args, vocab)
-  img_discriminator, d_img_kwargs = build_img_discriminator(args, vocab)
-  obj_discriminator= obj_discriminator.cuda()
-  img_discriminator=img_discriminator.cuda()
-
-  H,W = args.image_size
-  layout_discriminator = LayoutDiscriminator(args.batch_size,args.max_objects_per_image+1,184,H,W).cuda()  
-
-  gan_g_loss, gan_d_loss = get_gan_losses(args.gan_loss_type)
-  
-  obj_discriminator.type(float_dtype)
-  obj_discriminator.train()
-  optimizer_d_obj = torch.optim.Adam(obj_discriminator.parameters(),lr=args.learning_rate)
-
-
-  img_discriminator.type(float_dtype)
-  img_discriminator.train()
-  optimizer_d_img = torch.optim.Adam(img_discriminator.parameters(),lr=args.learning_rate)
-  
-
-  optimizer_d_layout=torch.optim.Adam(params=layout_discriminator.parameters(), lr = args.learning_rate)
-  
-  epoch = 0
+  if(not os.path.exists(args.output_folder)):
+    os.makedirs(args.output_folder)
 
   if(args.checkpoint_start_from is not None):
     model_path=args.checkpoint_start_from
 
     checkpoint = torch.load(model_path)
-    epoch = checkpoint['args']['epoch']
+    
     model.load_state_dict(checkpoint['model_state'])
     layoutgen.load_state_dict(checkpoint['layout_gen'])
-    
-    obj_discriminator.load_state_dict(checkpoint['d_obj_state'])
-    img_discriminator.load_state_dict(checkpoint['d_img_state'])
-    layout_discriminator.load_state_dict(checkpoint['d_layout_state'])
 
-    optimizer_d_obj.load_state_dict(checkpoint['d_obj_optim_state'])
-    optimizer_d_img.load_state_dict(checkpoint['d_img_optim_state'])
-    optimizer_d_layout.load_state_dict(checkpoint['d_layout_optim_state'])
-    optimizer.load_state_dict(checkpoint['optim_state'])
+  num_samples=0
+  for batchnum,batch in enumerate(tqdm(val_loader)):
+    imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, combined,all_num_objs = batch
+    imgs,objs,boxes,masks,triples,obj_to_img,triple_to_img,combined,all_num_objs = imgs.cuda(),objs.cuda(),boxes.cuda(),masks.cuda(),triples.cuda(),obj_to_img.cuda(),triple_to_img.cuda(),combined.cuda(),all_num_objs.cuda() 
 
-
-  while True:
-    if(epoch>=args.num_epochs):
-      break
-    
-    epoch += 1
-    print('Starting epoch %d' % epoch)
-    
-    for batchnum,batch in enumerate(tqdm(train_loader)):
-      imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, combined,all_num_objs = batch
-      imgs,objs,boxes,masks,triples,obj_to_img,triple_to_img,combined,all_num_objs = imgs.cuda(),objs.cuda(),boxes.cuda(),masks.cuda(),triples.cuda(),obj_to_img.cuda(),triple_to_img.cuda(),combined.cuda(),all_num_objs.cuda() 
-
-      if(imgs.shape[0]<args.batch_size):
-        print('current size was',imgs.shape[0])
-        continue
-      #print('\n\nimages',imgs.shape,objs.shape,boxes.shape,masks.shape,combined.shape)
-      #print(all_num_objs)
+    for k in range(2):
       zlist = []
       for i in range(args.batch_size):
           geo_z=torch.normal(0,1,size=(args.max_objects_per_image+1,4))
@@ -366,145 +320,33 @@ def main(args):
       
       feature_vectors,logit_boxes = layoutgen(zlist.cuda())
       generated_boxes = 1/(1+torch.exp(-1*logit_boxes))
-      
-
+    
       new_gen_boxes = torch.empty((0,4)).cuda()
       new_feature_vecs=torch.empty((0,args.embedding_dim)).cuda()
+      #print(generated_boxes[0,:,:4])
 
       for kb in range(args.batch_size):
           new_gen_boxes=torch.cat([new_gen_boxes,torch.squeeze(generated_boxes[kb,:all_num_objs[kb],:4])],dim=0)
           new_feature_vecs=torch.cat([new_feature_vecs,torch.squeeze(feature_vectors[kb,:all_num_objs[kb],:])],dim=0)
 
       boxes_pred=new_gen_boxes
-      model_boxes=generated_boxes
-      model_masks=None
+
       triples=None
-
       imgs_pred = model(new_feature_vecs,new_gen_boxes, triples, obj_to_img)
-                        #boxes_gt=model_boxes, masks_gt=model_masks)
-      #imgs_pred, boxes_pred, masks_pred, predicate_scores = model_out
+      imgs_pred = imagenet_deprocess_batch(imgs_pred)
       
-      # Skip the pixel loss if using GT boxes
+      for idx in range(imgs_pred.shape[0]):
+        current_img=imgs_pred[idx,:,:,:].numpy().transpose(1, 2, 0)
+        cv2.imwrite(os.path.join(args.output_folder,str(batchnum)+'_'+str(k)+'_'+str(idx)+'.jpg'), current_img)
 
-      total_loss, losses =  calculate_model_losses(args, model, imgs, imgs_pred,boxes, boxes_pred, logit_boxes, generated_boxes,combined)
+      num_samples+=1
 
-      scores_fake, ac_loss = obj_discriminator(imgs_pred, objs, boxes, obj_to_img)
-      total_loss = add_loss(total_loss, ac_loss, losses, 'ac_loss',
-                            args.ac_loss_weight)
-      weight = args.discriminator_loss_weight * args.d_obj_weight
-      total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
-                            'g_gan_obj_loss', weight)
+    if(num_samples+1>=args.num_sample_imgs):
+      break
 
-      
-      scores_fake = img_discriminator(imgs_pred)
-      weight = args.discriminator_loss_weight * args.d_img_weight
-      total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
-                            'g_gan_img_loss', weight)
+    
+    
 
-      scores_fake = layout_discriminator(logit_boxes)
-      weight = args.discriminator_loss_weight * args.d_img_weight
-      total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
-                            'g_gan_layout_loss', weight)
-
-
-      losses['total_loss'] = total_loss.item()
-      if not math.isfinite(losses['total_loss']):
-        print('WARNING: Got loss = NaN, not backpropping')
-        continue
-
-      optimizer.zero_grad()
-      
-      #print('Total loss:',total_loss)
-      total_loss.backward()
-
-      optimizer.step()
-      total_loss_d = None
-      ac_loss_real = None
-      ac_loss_fake = None
-      d_losses = {}
-      
-      
-      d_obj_losses = LossManager()
-      imgs_fake = imgs_pred.detach().cuda()
-      scores_fake, ac_loss_fake = obj_discriminator(imgs_fake, objs, boxes, obj_to_img)
-      scores_real, ac_loss_real = obj_discriminator(imgs, objs, boxes, obj_to_img)
-
-      d_obj_gan_loss = gan_d_loss(scores_real, scores_fake)
-      d_obj_losses.add_loss(d_obj_gan_loss, 'd_obj_gan_loss')
-      d_obj_losses.add_loss(ac_loss_real, 'd_ac_loss_real')
-      d_obj_losses.add_loss(ac_loss_fake, 'd_ac_loss_fake')
-
-      optimizer_d_obj.zero_grad()
-      d_obj_losses.total_loss.backward()
-      optimizer_d_obj.step()
-
-      
-      d_img_losses = LossManager()
-      imgs_fake = imgs_pred.detach().cuda()
-      scores_fake = img_discriminator(imgs_fake)
-      scores_real = img_discriminator(imgs)
-
-      d_img_gan_loss = gan_d_loss(scores_real, scores_fake)
-      d_img_losses.add_loss(d_img_gan_loss, 'd_img_gan_loss')
-      
-      optimizer_d_img.zero_grad()
-      d_img_losses.total_loss.backward()
-      optimizer_d_img.step()
-
-      d_layout_losses = LossManager()
-      layout_fake = logit_boxes.detach()
-      scores_fake = layout_discriminator(layout_fake)
-      scores_real = layout_discriminator(combined)
-      
-      d_layout_gan_loss = gan_d_loss(scores_real, scores_fake)
-      d_layout_losses.add_loss(d_layout_gan_loss, 'd_layout_gan_loss')
-      
-      optimizer_d_layout.zero_grad()
-      d_layout_losses.total_loss.backward()
-      optimizer_d_layout.step()
-
-      if((batchnum+1)%10==0):
-        towrite='\n|Epoch:'+str(epoch)+' | Batch:'+str(batchnum)+' | layout Loss:'+str(d_layout_losses.total_loss.item())+' | img disc loss:'+str(d_img_losses.total_loss.item())+' | obj disc loss:'+str(d_obj_losses.total_loss.item())+' | total gen loss:'+str(total_loss.item())
-        with open('stats/training_stats.txt','a+') as f:
-            f.write(towrite)
-
-      if((batchnum+1)%100==0):
-        checkpoint={
-        'args':{'epoch':epoch},
-        'model_state':model.state_dict(),
-        'layout_gen':layoutgen.state_dict(),
-        'd_obj_state': obj_discriminator.state_dict(),
-        'd_img_state': img_discriminator.state_dict(),
-        'd_layout_state':layout_discriminator.state_dict(),
-
-        'd_obj_optim_state': optimizer_d_obj.state_dict(),
-        'd_img_optim_state': optimizer_d_img.state_dict(),
-        'd_layout_optim_state':optimizer_d_layout.state_dict(),
-        'optim_state': optimizer.state_dict(),
-
-        }
-        print('Saving checkpoint to ', args.checkpoint_folder)
-        checkpoint_path = os.path.join(args.checkpoint_folder,'epoch_'+str(epoch)+'_batch_'+str(batchnum)+'_with_model.pt')
-        torch.save(checkpoint, checkpoint_path)
-
-
-    checkpoint={
-    'args':{'epoch':epoch},
-    'model_state':model.state_dict(),
-    'layout_gen':layoutgen.state_dict(),
-    'd_obj_state': obj_discriminator.state_dict(),
-    'd_img_state': img_discriminator.state_dict(),
-    'd_layout_state':layout_discriminator.state_dict(),
-
-    'd_obj_optim_state': optimizer_d_obj.state_dict(),
-    'd_img_optim_state': optimizer_d_img.state_dict(),
-    'd_layout_optim_state':optimizer_d_layout.state_dict(),
-    'optim_state': optimizer.state_dict(),
-
-    }
-    print('Saving checkpoint to ', args.checkpoint_folder)
-    checkpoint_path = os.path.join(args.checkpoint_folder,'epoch_'+str(epoch)+'_with_model.pt')
-    torch.save(checkpoint, checkpoint_path)
 
 if __name__ == '__main__':
   args = parser.parse_args()
