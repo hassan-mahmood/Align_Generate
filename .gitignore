@@ -1,7 +1,4 @@
 *.swp
 *.pyc
 *.DS_Store
-outputs/
-sg2im-models/
-env/
-datasets/
+sftp-config.json

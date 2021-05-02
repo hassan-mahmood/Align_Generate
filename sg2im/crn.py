@@ -106,6 +106,7 @@ class RefinementNetwork(nn.Module):
     for mod in self.refinement_modules:
       feats = F.upsample(feats, scale_factor=2, mode='nearest')
       feats = mod(layout, feats)
+      
 
     out = self.output_conv(feats)
     return out

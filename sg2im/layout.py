@@ -153,7 +153,7 @@ def _pool_samples(samples, obj_to_img, pooling='sum'):
     ones = torch.ones(O, dtype=dtype, device=device)
     obj_counts = torch.zeros(N, dtype=dtype, device=device)
     obj_counts = obj_counts.scatter_add(0, obj_to_img, ones)
-    print(obj_counts)
+    #print(obj_counts)
     obj_counts = obj_counts.clamp(min=1)
     out = out / obj_counts.view(N, 1, 1, 1)
   elif pooling != 'sum':

@@ -35,20 +35,22 @@ from sg2im.data.vg import VgSceneGraphDataset, vg_collate_fn
 from sg2im.discriminators import PatchDiscriminator, AcCropDiscriminator
 from sg2im.losses import get_gan_losses
 from sg2im.metrics import jaccard
-from sg2im.model import Sg2ImModel
+from sg2im.model import Layout2ImModel
 from sg2im.utils import int_tuple, float_tuple, str_tuple
 from sg2im.utils import timeit, bool_flag, LossManager
+from models.layout_model import * 
+from tqdm import tqdm 
 
 torch.backends.cudnn.benchmark = True
 
 VG_DIR = os.path.expanduser('datasets/vg')
-COCO_DIR = os.path.expanduser('datasets/coco')
+COCO_DIR = os.path.expanduser('/mnt/xfs1/hassan2/projectdata/data/coco/val2017/')
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', default='coco', choices=['vg', 'coco'])
 
 # Optimization hyperparameters
-parser.add_argument('--batch_size', default=32, type=int)
+parser.add_argument('--batch_size', default=100, type=int)
 parser.add_argument('--num_iterations', default=1000000, type=int)
 parser.add_argument('--learning_rate', default=1e-4, type=float)
 
@@ -68,22 +70,22 @@ parser.add_argument('--vg_image_dir', default=os.path.join(VG_DIR, 'images'))
 parser.add_argument('--train_h5', default=os.path.join(VG_DIR, 'train.h5'))
 parser.add_argument('--val_h5', default=os.path.join(VG_DIR, 'val.h5'))
 parser.add_argument('--vocab_json', default=os.path.join(VG_DIR, 'vocab.json'))
-parser.add_argument('--max_objects_per_image', default=10, type=int)
+parser.add_argument('--max_objects_per_image', default=8, type=int)
 parser.add_argument('--vg_use_orphaned_objects', default=True, type=bool_flag)
 
 # COCO-specific options
 parser.add_argument('--coco_train_image_dir',
-         default=os.path.join(COCO_DIR, 'images/train2017'))
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/train2017/'))
 parser.add_argument('--coco_val_image_dir',
-         default=os.path.join(COCO_DIR, 'images/val2017'))
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/val2017/'))
 parser.add_argument('--coco_train_instances_json',
-         default=os.path.join(COCO_DIR, 'annotations/instances_train2017.json'))
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_train2017.json'))
 parser.add_argument('--coco_train_stuff_json',
-         default=os.path.join(COCO_DIR, 'annotations/stuff_train2017.json'))
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_train2017.json'))
 parser.add_argument('--coco_val_instances_json',
-         default=os.path.join(COCO_DIR, 'annotations/instances_val2017.json'))
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_val2017.json'))
 parser.add_argument('--coco_val_stuff_json',
-         default=os.path.join(COCO_DIR, 'annotations/stuff_val2017.json'))
+         default=os.path.join(COCO_DIR, '/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_val2017.json'))
 parser.add_argument('--instance_whitelist', default=None, type=str_tuple)
 parser.add_argument('--stuff_whitelist', default=None, type=str_tuple)
 parser.add_argument('--coco_include_other', default=False, type=bool_flag)
@@ -162,7 +164,7 @@ def build_model(args, vocab):
   if args.checkpoint_start_from is not None:
     checkpoint = torch.load(args.checkpoint_start_from)
     kwargs = checkpoint['model_kwargs']
-    model = Sg2ImModel(**kwargs)
+    #model = Sg2ImModel(**kwargs)
     raw_state_dict = checkpoint['model_state']
     state_dict = {}
     for k, v in raw_state_dict.items():
@@ -185,7 +187,7 @@ def build_model(args, vocab):
       'mask_size': args.mask_size,
       'layout_noise_dim': args.layout_noise_dim,
     }
-    model = Sg2ImModel(**kwargs)
+    model = Layout2ImModel(**kwargs)
   return model, kwargs
 
 
@@ -307,6 +309,7 @@ def build_loaders(args):
 
 
 def check_model(args, t, loader, model):
+  return
   float_dtype = torch.cuda.FloatTensor
   long_dtype = torch.cuda.LongTensor
   num_samples = 0
@@ -321,7 +324,7 @@ def check_model(args, t, loader, model):
         imgs, objs, boxes, triples, obj_to_img, triple_to_img = batch
       elif len(batch) == 7:
         imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img = batch
-      predicates = triples[:, 1] 
+      
 
       # Run the model as it has been run during training
       model_masks = masks
@@ -384,31 +387,33 @@ def check_model(args, t, loader, model):
   return tuple(out)
 
 
-def calculate_model_losses(args, skip_pixel_loss, model, img, img_pred,
-                           bbox, bbox_pred, masks, masks_pred,
-                           predicates, predicate_scores):
+def calculate_model_losses(args, model, img, img_pred,
+                           bbox, bbox_pred, logit_boxes,generated_boxes,original_combined):
   total_loss = torch.zeros(1).to(img)
   losses = {}
 
   l1_pixel_weight = args.l1_pixel_loss_weight
-  if skip_pixel_loss:
-    l1_pixel_weight = 0
+
   l1_pixel_loss = F.l1_loss(img_pred, img)
+
   total_loss = add_loss(total_loss, l1_pixel_loss, losses, 'L1_pixel_loss',
                         l1_pixel_weight)
+
   loss_bbox = F.mse_loss(bbox_pred, bbox)
   total_loss = add_loss(total_loss, loss_bbox, losses, 'bbox_pred',
                         args.bbox_pred_loss_weight)
 
-  if args.predicate_pred_loss_weight > 0:
-    loss_predicate = F.cross_entropy(predicate_scores, predicates)
-    total_loss = add_loss(total_loss, loss_predicate, losses, 'predicate_pred',
-                          args.predicate_pred_loss_weight)
+  orig_labels=torch.argmax(original_combined[:,:,4:],dim=2).view(-1)
 
-  if args.mask_loss_weight > 0 and masks is not None and masks_pred is not None:
-    mask_loss = F.binary_cross_entropy(masks_pred, masks.float())
-    total_loss = add_loss(total_loss, mask_loss, losses, 'mask_loss',
-                          args.mask_loss_weight)
+  #print('logits:',logit_boxes.shape)
+  loss_classification=nn.CrossEntropyLoss()
+  loss_classify = loss_classification(logit_boxes[:,:,4:].view(-1,184), orig_labels)
+  
+  total_loss = add_loss(total_loss, loss_classify, losses, 'classification_loss')
+  mse_loss = F.mse_loss(generated_boxes[:,:,:4], original_combined[:,:,:4])
+  total_loss = add_loss(total_loss, mse_loss, losses, 'mse_loss',
+                        args.bbox_pred_loss_weight)
+
   return total_loss, losses
 
 
@@ -421,133 +426,161 @@ def main(args):
   vocab, train_loader, val_loader = build_loaders(args)
   model, model_kwargs = build_model(args, vocab)
   model.type(float_dtype)
-  print(model)
-
-  optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
+  model=model.cuda()
+  layoutgen = LayoutGenerator(args.batch_size,args.max_objects_per_image+1,184).cuda()
+  optimizer_params = list(model.parameters()) + list(layoutgen.parameters())
+  optimizer = torch.optim.Adam(params=optimizer_params, lr=args.learning_rate)
+  
 
   obj_discriminator, d_obj_kwargs = build_obj_discriminator(args, vocab)
   img_discriminator, d_img_kwargs = build_img_discriminator(args, vocab)
+  obj_discriminator= obj_discriminator.cuda()
+  img_discriminator=img_discriminator.cuda()
+  layout_discriminator = LayoutDiscriminator(args.batch_size,args.max_objects_per_image+1,184,64,64).cuda()  
+
   gan_g_loss, gan_d_loss = get_gan_losses(args.gan_loss_type)
+  
+  obj_discriminator.type(float_dtype)
+  obj_discriminator.train()
+  optimizer_d_obj = torch.optim.Adam(obj_discriminator.parameters(),lr=args.learning_rate)
 
-  if obj_discriminator is not None:
-    obj_discriminator.type(float_dtype)
-    obj_discriminator.train()
-    print(obj_discriminator)
-    optimizer_d_obj = torch.optim.Adam(obj_discriminator.parameters(),
-                                       lr=args.learning_rate)
 
-  if img_discriminator is not None:
-    img_discriminator.type(float_dtype)
-    img_discriminator.train()
-    print(img_discriminator)
-    optimizer_d_img = torch.optim.Adam(img_discriminator.parameters(),
-                                       lr=args.learning_rate)
+  img_discriminator.type(float_dtype)
+  img_discriminator.train()
+  optimizer_d_img = torch.optim.Adam(img_discriminator.parameters(),lr=args.learning_rate)
+  
 
-  restore_path = None
-  if args.restore_from_checkpoint:
-    restore_path = '%s_with_model.pt' % args.checkpoint_name
-    restore_path = os.path.join(args.output_dir, restore_path)
-  if restore_path is not None and os.path.isfile(restore_path):
-    print('Restoring from checkpoint:')
-    print(restore_path)
-    checkpoint = torch.load(restore_path)
-    model.load_state_dict(checkpoint['model_state'])
-    optimizer.load_state_dict(checkpoint['optim_state'])
+  optimizer_d_layout=torch.optim.Adam(params=layout_discriminator.parameters(), lr = args.learning_rate)
+  
 
-    if obj_discriminator is not None:
-      obj_discriminator.load_state_dict(checkpoint['d_obj_state'])
-      optimizer_d_obj.load_state_dict(checkpoint['d_obj_optim_state'])
+  # restore_path = None
+  # if args.restore_from_checkpoint:
+  #   restore_path = 'stats/%s_with_model.pt' % args.checkpoint_name
+  #   restore_path = os.path.join(args.output_dir, restore_path)
 
-    if img_discriminator is not None:
-      img_discriminator.load_state_dict(checkpoint['d_img_state'])
-      optimizer_d_img.load_state_dict(checkpoint['d_img_optim_state'])
+  # if restore_path is not None and os.path.isfile(restore_path):
+  #   print('Restoring from checkpoint:')
+  #   print(restore_path)
+  #   checkpoint = torch.load(restore_path)
+  #   model.load_state_dict(checkpoint['model_state'])
+  #   optimizer.load_state_dict(checkpoint['optim_state'])
+    
+  #   obj_discriminator.load_state_dict(checkpoint['d_obj_state'])
+  #   optimizer_d_obj.load_state_dict(checkpoint['d_obj_optim_state'])
 
-    t = checkpoint['counters']['t']
-    if 0 <= args.eval_mode_after <= t:
-      model.eval()
-    else:
-      model.train()
-    epoch = checkpoint['counters']['epoch']
-  else:
-    t, epoch = 0, 0
-    checkpoint = {
-      'args': args.__dict__,
-      'vocab': vocab,
-      'model_kwargs': model_kwargs,
-      'd_obj_kwargs': d_obj_kwargs,
-      'd_img_kwargs': d_img_kwargs,
-      'losses_ts': [],
-      'losses': defaultdict(list),
-      'd_losses': defaultdict(list),
-      'checkpoint_ts': [],
-      'train_batch_data': [], 
-      'train_samples': [],
-      'train_iou': [],
-      'val_batch_data': [], 
-      'val_samples': [],
-      'val_losses': defaultdict(list),
-      'val_iou': [], 
-      'norm_d': [], 
-      'norm_g': [],
-      'counters': {
-        't': None,
-        'epoch': None,
-      },
-      'model_state': None, 'model_best_state': None, 'optim_state': None,
-      'd_obj_state': None, 'd_obj_best_state': None, 'd_obj_optim_state': None,
-      'd_img_state': None, 'd_img_best_state': None, 'd_img_optim_state': None,
-      'best_t': [],
-    }
+  #   img_discriminator.load_state_dict(checkpoint['d_img_state'])
+  #   optimizer_d_img.load_state_dict(checkpoint['d_img_optim_state'])
 
+
+
+  #   t = checkpoint['counters']['t']
+  #   if 0 <= args.eval_mode_after <= t:
+  #     model.eval()
+  #   else:
+  #     model.train()
+  #   epoch = checkpoint['counters']['epoch']
+  # else:
+  #   t, epoch = 0, 0
+  #   checkpoint = {
+  #     'args': args.__dict__,
+  #     'vocab': vocab,
+  #     'model_kwargs': model_kwargs,
+  #     'd_obj_kwargs': d_obj_kwargs,
+  #     'd_img_kwargs': d_img_kwargs,
+  #     'losses_ts': [],
+  #     'losses': defaultdict(list),
+  #     'd_losses': defaultdict(list),
+  #     'checkpoint_ts': [],
+  #     'train_batch_data': [], 
+  #     'train_samples': [],
+  #     'train_iou': [],
+  #     'val_batch_data': [], 
+  #     'val_samples': [],
+  #     'val_losses': defaultdict(list),
+  #     'val_iou': [], 
+  #     'norm_d': [], 
+  #     'norm_g': [],
+  #     'counters': {
+  #       't': None,
+  #       'epoch': None,
+  #     },
+  #     'model_state': None, 'model_best_state': None, 'optim_state': None,
+  #     'd_obj_state': None, 'd_obj_best_state': None, 'd_obj_optim_state': None,
+  #     'd_img_state': None, 'd_img_best_state': None, 'd_img_optim_state': None,
+  #     'best_t': [],
+  #   }
+
+  epoch = 0 
   while True:
-    if t >= args.num_iterations:
+    if(epoch>=20):
       break
+    
     epoch += 1
     print('Starting epoch %d' % epoch)
     
-    for batch in train_loader:
-      if t == args.eval_mode_after:
-        print('switching to eval mode')
-        model.eval()
-        optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
-      t += 1
-      batch = [tensor.cuda() for tensor in batch]
-      masks = None
-      if len(batch) == 6:
-        imgs, objs, boxes, triples, obj_to_img, triple_to_img = batch
-      elif len(batch) == 7:
-        imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img = batch
-      else:
-        assert False
-      predicates = triples[:, 1]
+    for batchnum,batch in enumerate(tqdm(train_loader)):
+      imgs, objs, boxes, masks, triples, obj_to_img, triple_to_img, combined,all_num_objs = batch
+      imgs,objs,boxes,masks,triples,obj_to_img,triple_to_img,combined,all_num_objs = imgs.cuda(),objs.cuda(),boxes.cuda(),masks.cuda(),triples.cuda(),obj_to_img.cuda(),triple_to_img.cuda(),combined.cuda(),all_num_objs.cuda() 
+
+      #print('\n\nimages',imgs.shape,objs.shape,boxes.shape,masks.shape,combined.shape)
+      #print(all_num_objs)
+      zlist = []
+      for i in range(args.batch_size):
+          geo_z=torch.normal(0,1,size=(args.max_objects_per_image+1,4))
+          z=torch.FloatTensor(geo_z)
+          zlist.append(z)
+
+      zlist=torch.stack(zlist).cuda()
+      zlist=torch.cat((zlist,combined[:,:,4:]),dim=2)
+      
+      feature_vectors,logit_boxes = layoutgen(zlist.cuda())
+      generated_boxes = 1/(1+torch.exp(-1*logit_boxes))
+      
+
+      new_gen_boxes = torch.empty((0,4)).cuda()
+      new_feature_vecs=torch.empty((0,128)).cuda()
+
+      for kb in range(args.batch_size):
+          new_gen_boxes=torch.cat([new_gen_boxes,torch.squeeze(generated_boxes[kb,:all_num_objs[kb],:4])],dim=0)
+          new_feature_vecs=torch.cat([new_feature_vecs,torch.squeeze(feature_vectors[kb,:all_num_objs[kb],:])],dim=0)
+
+      #print('Shape of new gen boxes:',new_gen_boxes.shape)
+      #print('Shape of new feature vec:',new_feature_vecs.shape)
+      boxes_pred=new_gen_boxes
 
       with timeit('forward', args.timing):
-        model_boxes = boxes
-        model_masks = masks
-        model_out = model(objs, triples, obj_to_img,
-                          boxes_gt=model_boxes, masks_gt=model_masks)
-        imgs_pred, boxes_pred, masks_pred, predicate_scores = model_out
+        #model_boxes = boxes
+        model_boxes=generated_boxes
+        #model_masks = masks
+        model_masks=None
+        triples=None
+
+        imgs_pred = model(new_feature_vecs,new_gen_boxes, triples, obj_to_img)
+                          #boxes_gt=model_boxes, masks_gt=model_masks)
+        #imgs_pred, boxes_pred, masks_pred, predicate_scores = model_out
       with timeit('loss', args.timing):
         # Skip the pixel loss if using GT boxes
         skip_pixel_loss = (model_boxes is None)
-        total_loss, losses =  calculate_model_losses(
-                                args, skip_pixel_loss, model, imgs, imgs_pred,
-                                boxes, boxes_pred, masks, masks_pred,
-                                predicates, predicate_scores)
+        total_loss, losses =  calculate_model_losses(args, model, imgs, imgs_pred,boxes, boxes_pred, logit_boxes, generated_boxes,combined)
 
-      if obj_discriminator is not None:
-        scores_fake, ac_loss = obj_discriminator(imgs_pred, objs, boxes, obj_to_img)
-        total_loss = add_loss(total_loss, ac_loss, losses, 'ac_loss',
-                              args.ac_loss_weight)
-        weight = args.discriminator_loss_weight * args.d_obj_weight
-        total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
-                              'g_gan_obj_loss', weight)
+      scores_fake, ac_loss = obj_discriminator(imgs_pred, objs, boxes, obj_to_img)
+      total_loss = add_loss(total_loss, ac_loss, losses, 'ac_loss',
+                            args.ac_loss_weight)
+      weight = args.discriminator_loss_weight * args.d_obj_weight
+      total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
+                            'g_gan_obj_loss', weight)
 
-      if img_discriminator is not None:
-        scores_fake = img_discriminator(imgs_pred)
-        weight = args.discriminator_loss_weight * args.d_img_weight
-        total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
-                              'g_gan_img_loss', weight)
+      
+      scores_fake = img_discriminator(imgs_pred)
+      weight = args.discriminator_loss_weight * args.d_img_weight
+      total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
+                            'g_gan_img_loss', weight)
+
+      scores_fake = layout_discriminator(logit_boxes)
+      weight = args.discriminator_loss_weight * args.d_img_weight
+      total_loss = add_loss(total_loss, gan_g_loss(scores_fake), losses,
+                            'g_gan_layout_loss', weight)
+
 
       losses['total_loss'] = total_loss.item()
       if not math.isfinite(losses['total_loss']):
@@ -556,109 +589,165 @@ def main(args):
 
       optimizer.zero_grad()
       with timeit('backward', args.timing):
+        #print('Total loss:',total_loss)
         total_loss.backward()
+
       optimizer.step()
       total_loss_d = None
       ac_loss_real = None
       ac_loss_fake = None
       d_losses = {}
       
-      if obj_discriminator is not None:
-        d_obj_losses = LossManager()
-        imgs_fake = imgs_pred.detach()
-        scores_fake, ac_loss_fake = obj_discriminator(imgs_fake, objs, boxes, obj_to_img)
-        scores_real, ac_loss_real = obj_discriminator(imgs, objs, boxes, obj_to_img)
-
-        d_obj_gan_loss = gan_d_loss(scores_real, scores_fake)
-        d_obj_losses.add_loss(d_obj_gan_loss, 'd_obj_gan_loss')
-        d_obj_losses.add_loss(ac_loss_real, 'd_ac_loss_real')
-        d_obj_losses.add_loss(ac_loss_fake, 'd_ac_loss_fake')
-
-        optimizer_d_obj.zero_grad()
-        d_obj_losses.total_loss.backward()
-        optimizer_d_obj.step()
-
-      if img_discriminator is not None:
-        d_img_losses = LossManager()
-        imgs_fake = imgs_pred.detach()
-        scores_fake = img_discriminator(imgs_fake)
-        scores_real = img_discriminator(imgs)
-
-        d_img_gan_loss = gan_d_loss(scores_real, scores_fake)
-        d_img_losses.add_loss(d_img_gan_loss, 'd_img_gan_loss')
-        
-        optimizer_d_img.zero_grad()
-        d_img_losses.total_loss.backward()
-        optimizer_d_img.step()
-
-      if t % args.print_every == 0:
-        print('t = %d / %d' % (t, args.num_iterations))
-        for name, val in losses.items():
-          print(' G [%s]: %.4f' % (name, val))
-          checkpoint['losses'][name].append(val)
-        checkpoint['losses_ts'].append(t)
-
-        if obj_discriminator is not None:
-          for name, val in d_obj_losses.items():
-            print(' D_obj [%s]: %.4f' % (name, val))
-            checkpoint['d_losses'][name].append(val)
-
-        if img_discriminator is not None:
-          for name, val in d_img_losses.items():
-            print(' D_img [%s]: %.4f' % (name, val))
-            checkpoint['d_losses'][name].append(val)
       
-      if t % args.checkpoint_every == 0:
-        print('checking on train')
-        train_results = check_model(args, t, train_loader, model)
-        t_losses, t_samples, t_batch_data, t_avg_iou = train_results
+      d_obj_losses = LossManager()
+      imgs_fake = imgs_pred.detach().cuda()
+      scores_fake, ac_loss_fake = obj_discriminator(imgs_fake, objs, boxes, obj_to_img)
+      scores_real, ac_loss_real = obj_discriminator(imgs, objs, boxes, obj_to_img)
 
-        checkpoint['train_batch_data'].append(t_batch_data)
-        checkpoint['train_samples'].append(t_samples)
-        checkpoint['checkpoint_ts'].append(t)
-        checkpoint['train_iou'].append(t_avg_iou)
+      d_obj_gan_loss = gan_d_loss(scores_real, scores_fake)
+      d_obj_losses.add_loss(d_obj_gan_loss, 'd_obj_gan_loss')
+      d_obj_losses.add_loss(ac_loss_real, 'd_ac_loss_real')
+      d_obj_losses.add_loss(ac_loss_fake, 'd_ac_loss_fake')
 
-        print('checking on val')
-        val_results = check_model(args, t, val_loader, model)
-        val_losses, val_samples, val_batch_data, val_avg_iou = val_results
-        checkpoint['val_samples'].append(val_samples)
-        checkpoint['val_batch_data'].append(val_batch_data)
-        checkpoint['val_iou'].append(val_avg_iou)
+      optimizer_d_obj.zero_grad()
+      d_obj_losses.total_loss.backward()
+      optimizer_d_obj.step()
 
-        print('train iou: ', t_avg_iou)
-        print('val iou: ', val_avg_iou)
+      
+      d_img_losses = LossManager()
+      imgs_fake = imgs_pred.detach().cuda()
+      scores_fake = img_discriminator(imgs_fake)
+      scores_real = img_discriminator(imgs)
 
-        for k, v in val_losses.items():
-          checkpoint['val_losses'][k].append(v)
-        checkpoint['model_state'] = model.state_dict()
+      d_img_gan_loss = gan_d_loss(scores_real, scores_fake)
+      d_img_losses.add_loss(d_img_gan_loss, 'd_img_gan_loss')
+      
+      optimizer_d_img.zero_grad()
+      d_img_losses.total_loss.backward()
+      optimizer_d_img.step()
 
-        if obj_discriminator is not None:
-          checkpoint['d_obj_state'] = obj_discriminator.state_dict()
-          checkpoint['d_obj_optim_state'] = optimizer_d_obj.state_dict()
+      d_layout_losses = LossManager()
+      layout_fake = logit_boxes.detach()
+      scores_fake = layout_discriminator(layout_fake)
+      scores_real = layout_discriminator(combined)
+      
+      d_layout_gan_loss = gan_d_loss(scores_real, scores_fake)
+      d_layout_losses.add_loss(d_layout_gan_loss, 'd_layout_gan_loss')
+      
+      optimizer_d_layout.zero_grad()
+      d_layout_losses.total_loss.backward()
+      optimizer_d_layout.step()
 
-        if img_discriminator is not None:
-          checkpoint['d_img_state'] = img_discriminator.state_dict()
-          checkpoint['d_img_optim_state'] = optimizer_d_img.state_dict()
+      if((batchnum+1)%10==0):
+        towrite='\n|Epoch:'+str(epoch)+' | layout Loss:'+str(d_layout_losses.total_loss)+' | img disc loss:'+str(d_img_losses.total_loss)+' | obj disc loss:'+str(d_obj_losses.total_loss)+' | total gen loss:'+str(total_loss)
+        with open('stats/training_stats.txt','a+') as f:
+            f.write(towrite)
 
-        checkpoint['optim_state'] = optimizer.state_dict()
-        checkpoint['counters']['t'] = t
-        checkpoint['counters']['epoch'] = epoch
-        checkpoint_path = os.path.join(args.output_dir,
-                              '%s_with_model.pt' % args.checkpoint_name)
-        print('Saving checkpoint to ', checkpoint_path)
+      if((batchnum+1)%100==0):
+        checkpoint={
+        'model_state':model.state_dict(),
+        'layout_gen':layoutgen.state_dict(),
+        'd_obj_state': obj_discriminator.state_dict(),
+        'd_img_state': img_discriminator.state_dict(),
+        'd_layout_state':layout_discriminator.state_dict(),
+
+        'd_obj_optim_state': optimizer_d_obj.state_dict(),
+        'd_img_optim_state': optimizer_d_img.state_dict(),
+        'd_layout_optim_state':optimizer_d_layout.state_dict(),
+        'optim_state': optimizer.state_dict(),
+
+        }
+        print('Saving checkpoint to ', 'stats/')
+        checkpoint_path = os.path.join('stats/',
+                              'epoch_'+str(epoch)+'_batch_'+str(batchnum)+'_with_model.pt')
         torch.save(checkpoint, checkpoint_path)
 
-        # Save another checkpoint without any model or optim state
-        checkpoint_path = os.path.join(args.output_dir,
-                              '%s_no_model.pt' % args.checkpoint_name)
-        key_blacklist = ['model_state', 'optim_state', 'model_best_state',
-                         'd_obj_state', 'd_obj_optim_state', 'd_obj_best_state',
-                         'd_img_state', 'd_img_optim_state', 'd_img_best_state']
-        small_checkpoint = {}
-        for k, v in checkpoint.items():
-          if k not in key_blacklist:
-            small_checkpoint[k] = v
-        torch.save(small_checkpoint, checkpoint_path)
+
+    checkpoint={
+    'model_state':model.state_dict(),
+    'layout_gen':layoutgen.state_dict(),
+    'd_obj_state': obj_discriminator.state_dict(),
+    'd_img_state': img_discriminator.state_dict(),
+    'd_layout_state':layout_discriminator.state_dict(),
+
+    'd_obj_optim_state': optimizer_d_obj.state_dict(),
+    'd_img_optim_state': optimizer_d_img.state_dict(),
+    'd_layout_optim_state':optimizer_d_layout.state_dict(),
+    'optim_state': optimizer.state_dict(),
+
+    }
+    print('Saving checkpoint to ', 'stats/')
+    checkpoint_path = os.path.join('stats/',
+                              'epoch_'+str(epoch)+'_with_model.pt')
+    torch.save(checkpoint, checkpoint_path)
+      #   for name, val in losses.items():
+      #     print(' G [%s]: %.4f' % (name, val))
+      #     checkpoint['losses'][name].append(val)
+      #   checkpoint['losses_ts'].append(t)
+
+      #   if obj_discriminator is not None:
+      #     for name, val in d_obj_losses.items():
+      #       print(' D_obj [%s]: %.4f' % (name, val))
+      #       checkpoint['d_losses'][name].append(val)
+
+      #   if img_discriminator is not None:
+      #     for name, val in d_img_losses.items():
+      #       print(' D_img [%s]: %.4f' % (name, val))
+      #       checkpoint['d_losses'][name].append(val)
+      
+      # if t % args.checkpoint_every == 0:
+      #   print('checking on train')
+      #   train_results = check_model(args, t, train_loader, model)
+      #   t_losses, t_samples, t_batch_data, t_avg_iou = train_results
+
+      #   checkpoint['train_batch_data'].append(t_batch_data)
+      #   checkpoint['train_samples'].append(t_samples)
+      #   checkpoint['checkpoint_ts'].append(t)
+      #   checkpoint['train_iou'].append(t_avg_iou)
+
+      #   print('checking on val')
+      #   val_results = check_model(args, t, val_loader, model)
+      #   val_losses, val_samples, val_batch_data, val_avg_iou = val_results
+      #   checkpoint['val_samples'].append(val_samples)
+      #   checkpoint['val_batch_data'].append(val_batch_data)
+      #   checkpoint['val_iou'].append(val_avg_iou)
+
+      #   print('train iou: ', t_avg_iou)
+      #   print('val iou: ', val_avg_iou)
+
+        # for k, v in val_losses.items():
+        #   checkpoint['val_losses'][k].append(v)
+        # checkpoint['model_state'] = model.state_dict()
+
+        # checkpoint['layoutgen'] = layoutgen.state_dict()
+        # #checkpoint['layoutgen_state'] = 
+        # if obj_discriminator is not None:
+        #   checkpoint['d_obj_state'] = obj_discriminator.state_dict()
+        #   checkpoint['d_obj_optim_state'] = optimizer_d_obj.state_dict()
+
+        # if img_discriminator is not None:
+        #   checkpoint['d_img_state'] = img_discriminator.state_dict()
+        #   checkpoint['d_img_optim_state'] = optimizer_d_img.state_dict()
+
+        # checkpoint['optim_state'] = optimizer.state_dict()
+        # checkpoint['counters']['t'] = t
+        # checkpoint['counters']['epoch'] = epoch
+        # checkpoint_path = os.path.join(args.output_dir,
+        #                       '%s_with_model.pt' % args.checkpoint_name)
+        # print('Saving checkpoint to ', checkpoint_path)
+        # torch.save(checkpoint, checkpoint_path)
+
+        # # Save another checkpoint without any model or optim state
+        # checkpoint_path = os.path.join(args.output_dir,
+        #                       '%s_no_model.pt' % args.checkpoint_name)
+        # key_blacklist = ['model_state', 'optim_state', 'model_best_state',
+        #                  'd_obj_state', 'd_obj_optim_state', 'd_obj_best_state',
+        #                  'd_img_state', 'd_img_optim_state', 'd_img_best_state']
+        # small_checkpoint = {}
+        # for k, v in checkpoint.items():
+        #   if k not in key_blacklist:
+        #     small_checkpoint[k] = v
+        # torch.save(small_checkpoint, checkpoint_path)
 
 
 if __name__ == '__main__':

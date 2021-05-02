@@ -193,6 +193,7 @@ class CocoSceneGraphDataset(Dataset):
       if min_objects_per_image <= num_objs <= max_objects_per_image:
         new_image_ids.append(image_id)
     self.image_ids = new_image_ids
+    self.max_objects_per_image=max_objects_per_image
 
     self.vocab['pred_idx_to_name'] = [
       '__in_image__',
@@ -356,7 +357,21 @@ class CocoSceneGraphDataset(Dataset):
       triples.append([i, in_image, O - 1])
     
     triples = torch.LongTensor(triples)
-    return image, objs, boxes, masks, triples
+
+    combined=np.zeros(shape=(self.max_objects_per_image+1,188),dtype=np.float32)
+    # print('\n\nnow cobined shape:',combined.shape)
+    # print('boxes shape:',boxes.shape,self.max_objects_per_image)
+    # print('\n objs shape:',objs.shape)
+    combined[:boxes.shape[0],:4]=boxes[:self.max_objects_per_image+1,:]
+    combined[np.arange(objs.shape[0]),4+objs] = 1
+    combined=np.expand_dims(combined,axis=0)
+    combined=torch.FloatTensor(combined)      
+    #print('\n combined:',combined)
+    return image, objs, boxes, masks, triples, combined, torch.LongTensor([O])
+
+
+
+    #return image, objs, boxes, masks, triples
     
 
 def seg_to_mask(seg, width=1.0, height=1.0):
@@ -386,10 +401,10 @@ def coco_collate_fn(batch):
   - obj_to_img: LongTensor of shape (O,) mapping objects to images
   - triple_to_img: LongTensor of shape (T,) mapping triples to images
   """
-  all_imgs, all_objs, all_boxes, all_masks, all_triples = [], [], [], [], []
+  all_imgs, all_objs, all_boxes, all_masks, all_triples,all_combined,all_num_objs = [], [], [], [], [],[],[]
   all_obj_to_img, all_triple_to_img = [], []
   obj_offset = 0
-  for i, (img, objs, boxes, masks, triples) in enumerate(batch):
+  for i, (img, objs, boxes, masks, triples,combined,c_num_obj) in enumerate(batch):
     all_imgs.append(img[None])
     if objs.dim() == 0 or triples.dim() == 0:
       continue
@@ -397,6 +412,8 @@ def coco_collate_fn(batch):
     all_objs.append(objs)
     all_boxes.append(boxes)
     all_masks.append(masks)
+    all_num_objs.append(c_num_obj)
+    all_combined.append(combined)
     triples = triples.clone()
     triples[:, 0] += obj_offset
     triples[:, 2] += obj_offset
@@ -413,8 +430,10 @@ def coco_collate_fn(batch):
   all_triples = torch.cat(all_triples)
   all_obj_to_img = torch.cat(all_obj_to_img)
   all_triple_to_img = torch.cat(all_triple_to_img)
+  all_combined=torch.cat(all_combined,dim=0)
+  all_num_objs = torch.cat(all_num_objs)
 
   out = (all_imgs, all_objs, all_boxes, all_masks, all_triples,
-         all_obj_to_img, all_triple_to_img)
+         all_obj_to_img, all_triple_to_img, all_combined,all_num_objs)
   return out
 
