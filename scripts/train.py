@@ -46,7 +46,7 @@ torch.backends.cudnn.benchmark = True
 parser = argparse.ArgumentParser()
 
 # Optimization hyperparameters
-parser.add_argument('--batch_size', default=5, type=int)
+parser.add_argument('--batch_size', default=50, type=int)
 parser.add_argument('--num_epochs', default=100, type=int)
 parser.add_argument('--learning_rate', default=1e-4, type=float)
 
@@ -63,13 +63,13 @@ parser.add_argument('--max_objects_per_image', default=8, type=int)
 
 # COCO-specific options
 parser.add_argument('--coco_train_image_dir',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/val2017/')
+         default='/mnt/xfs1/hassan2/projectdata/data/coco/train2017/')
 parser.add_argument('--coco_val_image_dir',
          default='/mnt/xfs1/hassan2/projectdata/data/coco/val2017/')
 parser.add_argument('--coco_train_instances_json',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_val2017.json')
+         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_train2017.json')
 parser.add_argument('--coco_train_stuff_json',
-         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_val2017.json')
+         default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/stuff_train2017.json')
 parser.add_argument('--coco_val_instances_json',
          default='/mnt/xfs1/hassan2/projectdata/data/coco/annotations/instances_val2017.json')
 parser.add_argument('--coco_val_stuff_json',
@@ -111,7 +111,7 @@ parser.add_argument('--d_activation', default='leakyrelu-0.2')
 # Object discriminator
 parser.add_argument('--d_obj_arch',
     default='C4-64-2,C4-128-2,C4-256-2')
-parser.add_argument('--crop_size', default=16, type=int)
+parser.add_argument('--crop_size', default=32, type=int)
 parser.add_argument('--d_obj_weight', default=1.0, type=float) # multiplied by d_loss_weight 
 parser.add_argument('--ac_loss_weight', default=0.1, type=float)
 
@@ -122,7 +122,7 @@ parser.add_argument('--d_img_weight', default=1.0, type=float) # multiplied by d
 # Output options
 
 parser.add_argument('--checkpoint_folder', default='generated_outputs')
-parser.add_argument('--checkpoint_start_from', default='stats/epoch_3_batch_99_with_model.pt')
+parser.add_argument('--checkpoint_start_from', default='stats/epoch_3_batch_1099_with_model.pt')
 
 
 def add_loss(total_loss, curr_loss, loss_dict, loss_name, weight=1):
@@ -319,13 +319,13 @@ def main(args):
 
   optimizer_d_layout=torch.optim.Adam(params=layout_discriminator.parameters(), lr = args.learning_rate)
   
-  epoch = 0
+  epoch = 3
 
   if(args.checkpoint_start_from is not None):
     model_path=args.checkpoint_start_from
 
     checkpoint = torch.load(model_path)
-    epoch = checkpoint['args']['epoch']
+    #epoch = checkpoint['args']['epoch']
     model.load_state_dict(checkpoint['model_state'])
     layoutgen.load_state_dict(checkpoint['layout_gen'])
     
@@ -365,11 +365,12 @@ def main(args):
       zlist=torch.cat((zlist,combined[:,:,4:]),dim=2)
       
       feature_vectors,logit_boxes = layoutgen(zlist.cuda())
+
       generated_boxes = 1/(1+torch.exp(-1*logit_boxes))
       
 
       new_gen_boxes = torch.empty((0,4)).cuda()
-      new_feature_vecs=torch.empty((0,args.embedding_dim)).cuda()
+      new_feature_vecs=torch.empty((0,128)).cuda()
 
       for kb in range(args.batch_size):
           new_gen_boxes=torch.cat([new_gen_boxes,torch.squeeze(generated_boxes[kb,:all_num_objs[kb],:4])],dim=0)

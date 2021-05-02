@@ -109,7 +109,7 @@ parser.add_argument('--d_activation', default='leakyrelu-0.2')
 # Object discriminator
 parser.add_argument('--d_obj_arch',
     default='C4-64-2,C4-128-2,C4-256-2')
-parser.add_argument('--crop_size', default=16, type=int)
+parser.add_argument('--crop_size', default=32, type=int)
 parser.add_argument('--d_obj_weight', default=1.0, type=float) # multiplied by d_loss_weight 
 parser.add_argument('--ac_loss_weight', default=0.1, type=float)
 
